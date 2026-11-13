@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OpCore Simplify
+Comment=Generate an OpenCore EFI for this hardware
+Exec=opcore-simplify
+Icon=opcore-simplify
+Terminal=true
+Categories=Utility;
