@@ -1,7 +1,8 @@
+use crate::compat::Report;
 use crate::download;
-use crate::hardware::{Hardware, PciClass};
+use crate::hardware::Hardware;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct KextEntry {
@@ -10,115 +11,110 @@ pub struct KextEntry {
     pub plist: String,
 }
 
-enum Origin {
-    Github(&'static str, &'static str, &'static str),
-    Direct(&'static str),
+/// A kext we know how to download.
+pub struct Def {
+    pub id: &'static str,
+    pub desc: &'static str,
+    /// GitHub "owner/name" (empty when `direct` is used)
+    pub repo: &'static str,
+    /// release asset name must start with this
+    pub asset: &'static str,
+    /// ...and contain this (case-insensitive)
+    pub contains: &'static str,
+    pub direct: &'static str,
+    /// bundles to copy out of the zip (empty = every non-debug kext)
+    pub bundles: &'static [&'static str],
+    /// macOS major versions this kext is used on
+    pub min: u32,
+    pub max: u32,
 }
 
-struct Source {
-    origin: Origin,
-    wanted: Vec<&'static str>,
+const fn gh(
+    id: &'static str,
+    desc: &'static str,
+    repo: &'static str,
+    asset: &'static str,
+    contains: &'static str,
+    bundles: &'static [&'static str],
+    min: u32,
+    max: u32,
+) -> Def {
+    Def { id, desc, repo, asset, contains, direct: "", bundles, min, max }
 }
 
-fn github(repo: &'static str, prefix: &'static str, contains: &'static str, wanted: &[&'static str]) -> Source {
-    Source {
-        origin: Origin::Github(repo, prefix, contains),
-        wanted: wanted.to_vec(),
-    }
+/// Order matters: it is the load order written to config.plist.
+pub static CATALOG: &[Def] = &[
+    gh("Lilu", "Patch engine required by most kexts", "acidanthera/Lilu", "Lilu-", "release", &["Lilu.kext"], 11, 26),
+    gh("VirtualSMC", "SMC emulator and CPU sensors", "acidanthera/VirtualSMC", "VirtualSMC-", "release", &["VirtualSMC.kext", "SMCProcessor.kext"], 11, 26),
+    gh("SMCBatteryManager", "Battery status (laptops)", "acidanthera/VirtualSMC", "VirtualSMC-", "release", &["SMCBatteryManager.kext"], 11, 26),
+    gh("SMCSuperIO", "Fan and sensor chips (desktops)", "acidanthera/VirtualSMC", "VirtualSMC-", "release", &["SMCSuperIO.kext"], 11, 26),
+    gh("WhateverGreen", "Graphics patches (Intel, AMD, NVIDIA disable)", "acidanthera/WhateverGreen", "WhateverGreen-", "release", &["WhateverGreen.kext"], 11, 26),
+    gh("WhateverXe", "Tiger Lake Xe graphics", "b00t0x/WhateverXe", "", "release", &[], 11, 26),
+    Def {
+        id: "AMFIPass",
+        desc: "Lets the Xe graphics stack load with AMFI enabled",
+        repo: "",
+        asset: "",
+        contains: "",
+        direct: "https://github.com/b00t0x/WhateverXe-Graphics/raw/main/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip",
+        bundles: &[],
+        min: 11,
+        max: 26,
+    },
+    gh("AppleALC", "Native audio codec support", "acidanthera/AppleALC", "AppleALC-", "release", &["AppleALC.kext"], 11, 26),
+    gh("RestrictEvents", "CPU naming and unsupported-Mac fixes", "acidanthera/RestrictEvents", "RestrictEvents-", "release", &["RestrictEvents.kext"], 11, 26),
+    gh("NVMeFix", "NVMe power management", "acidanthera/NVMeFix", "NVMeFix-", "release", &["NVMeFix.kext"], 11, 26),
+    gh("ECEnabler", "Battery reads from 16-bit embedded controller fields", "1Revenger1/ECEnabler", "ECEnabler", "", &["ECEnabler.kext"], 11, 26),
+    gh("VoodooPS2", "PS/2 keyboard, mouse and trackpad", "acidanthera/VoodooPS2", "VoodooPS2Controller-", "release", &["VoodooPS2Controller.kext"], 11, 26),
+    gh("VoodooI2C", "I2C HID trackpads and touchscreens", "VoodooI2C/VoodooI2C", "VoodooI2C-", "", &["VoodooI2C.kext", "VoodooI2CHID.kext"], 11, 26),
+    gh("IntelMausi", "Intel Ethernet (I217/I218/I219)", "acidanthera/IntelMausi", "IntelMausi-", "release", &["IntelMausi.kext"], 11, 26),
+    gh("RealtekRTL8111", "Realtek RTL8111/8168 Ethernet", "Mieze/RTL8111_driver_for_OS_X", "RealtekRTL8111-", "", &["RealtekRTL8111.kext"], 11, 26),
+    gh("LucyRTL8125Ethernet", "Realtek RTL8125 2.5G Ethernet", "Mieze/LucyRTL8125Ethernet", "LucyRTL8125Ethernet-", "", &["LucyRTL8125Ethernet.kext"], 11, 26),
+    gh("itlwm", "Intel Wi-Fi (connect with HeliPort)", "OpenIntelWireless/itlwm", "itlwm_", "", &["itlwm.kext"], 11, 26),
+    gh("AirportBrcmFixup", "Broadcom Wi-Fi patches", "acidanthera/AirportBrcmFixup", "AirportBrcmFixup-", "release", &["AirportBrcmFixup.kext"], 11, 26),
+    gh("IntelBluetoothFirmware", "Intel Bluetooth firmware upload", "OpenIntelWireless/IntelBluetoothFirmware", "IntelBluetooth", "", &["IntelBluetoothFirmware.kext"], 11, 26),
+    gh("IntelBTPatcher", "Intel Bluetooth fixes", "OpenIntelWireless/IntelBluetoothFirmware", "IntelBluetooth", "", &["IntelBTPatcher.kext"], 11, 26),
+    gh("IntelBluetoothInjector", "Intel Bluetooth injector (Big Sur only)", "OpenIntelWireless/IntelBluetoothFirmware", "IntelBluetooth", "", &["IntelBluetoothInjector.kext"], 11, 11),
+    gh("BlueToolFixup", "Bluetooth stack fix for third-party cards (Monterey+)", "acidanthera/BrcmPatchRAM", "BrcmPatchRAM-", "release", &["BlueToolFixup.kext"], 12, 26),
+    gh("BrcmBluetoothInjector", "Broadcom Bluetooth injector (Big Sur only)", "acidanthera/BrcmPatchRAM", "BrcmPatchRAM-", "release", &["BrcmBluetoothInjector.kext"], 11, 11),
+    gh("BrcmFirmwareData", "Broadcom Bluetooth firmware", "acidanthera/BrcmPatchRAM", "BrcmPatchRAM-", "release", &["BrcmFirmwareData.kext"], 11, 26),
+    gh("BrcmPatchRAM3", "Broadcom Bluetooth firmware uploader", "acidanthera/BrcmPatchRAM", "BrcmPatchRAM-", "release", &["BrcmPatchRAM3.kext"], 11, 26),
+];
+
+pub struct Choice {
+    pub def: &'static Def,
+    pub enabled: bool,
+    pub reason: String,
 }
 
-fn plan(hw: &Hardware, xe: bool) -> Vec<Source> {
-    let mut sources = vec![github("acidanthera/Lilu", "Lilu-", "release", &["Lilu.kext"])];
-
-    let mut smc = vec!["VirtualSMC.kext", "SMCProcessor.kext"];
-    smc.push(if hw.is_laptop { "SMCBatteryManager.kext" } else { "SMCSuperIO.kext" });
-    sources.push(github("acidanthera/VirtualSMC", "VirtualSMC-", "release", &smc));
-
-    if xe {
-        sources.push(Source {
-            origin: Origin::Github("b00t0x/WhateverXe", "", "release"),
-            wanted: vec![],
-        });
-        sources.push(Source {
-            origin: Origin::Direct(
-                "https://github.com/b00t0x/WhateverXe-Graphics/raw/main/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip",
-            ),
-            wanted: vec![],
-        });
-    } else if hw.has(PciClass::Display) {
-        sources.push(github(
-            "acidanthera/WhateverGreen",
-            "WhateverGreen-",
-            "release",
-            &["WhateverGreen.kext"],
-        ));
-    }
-
-    if hw.has(PciClass::Audio) {
-        sources.push(github("acidanthera/AppleALC", "AppleALC-", "release", &["AppleALC.kext"]));
-    }
-    sources.push(github(
-        "acidanthera/RestrictEvents",
-        "RestrictEvents-",
-        "release",
-        &["RestrictEvents.kext"],
-    ));
-    if hw.has(PciClass::Nvme) {
-        sources.push(github("acidanthera/NVMeFix", "NVMeFix-", "release", &["NVMeFix.kext"]));
-    }
+/// Pick kexts for this hardware: the ones the compatibility rows ask for are enabled,
+/// every other kext valid for the chosen macOS stays available but off.
+pub fn plan(hw: &Hardware, report: &Report, macos: u32) -> Vec<Choice> {
+    let mut wanted: Vec<(&'static str, String)> = vec![
+        ("Lilu", "required".to_string()),
+        ("VirtualSMC", "required".to_string()),
+        (
+            if hw.is_laptop { "SMCBatteryManager" } else { "SMCSuperIO" },
+            if hw.is_laptop { "battery".to_string() } else { "sensors".to_string() },
+        ),
+        ("RestrictEvents", "recommended".to_string()),
+    ];
     if hw.is_laptop {
-        sources.push(github("1Revenger1/ECEnabler", "ECEnabler", "", &["ECEnabler.kext"]));
-        sources.push(github(
-            "acidanthera/VoodooPS2",
-            "VoodooPS2Controller-",
-            "release",
-            &["VoodooPS2Controller.kext"],
-        ));
-        sources.push(github(
-            "VoodooI2C/VoodooI2C",
-            "VoodooI2C-",
-            "",
-            &["VoodooI2C.kext", "VoodooI2CHID.kext"],
-        ));
+        wanted.push(("ECEnabler", "laptop".to_string()));
     }
-
-    const I225: [u16; 6] = [0x15F2, 0x15F3, 0x3100, 0x125B, 0x125C, 0x125D];
-    for device in &hw.devices {
-        match (device.class, device.vendor, device.device) {
-            (PciClass::Ethernet, 0x8086, id) if !I225.contains(&id) => {
-                sources.push(github("acidanthera/IntelMausi", "IntelMausi-", "release", &["IntelMausi.kext"]));
-            }
-            (PciClass::Ethernet, 0x10EC, 0x8168 | 0x8111) => {
-                sources.push(github(
-                    "Mieze/RTL8111_driver_for_OS_X",
-                    "RealtekRTL8111-",
-                    "",
-                    &["RealtekRTL8111.kext"],
-                ));
-            }
-            (PciClass::Ethernet, 0x10EC, 0x8125) => {
-                sources.push(github(
-                    "Mieze/LucyRTL8125Ethernet",
-                    "LucyRTL8125Ethernet-",
-                    "",
-                    &["LucyRTL8125Ethernet.kext"],
-                ));
-            }
-            (PciClass::Wireless, 0x8086, _) => {
-                sources.push(github("OpenIntelWireless/itlwm", "itlwm_", "", &["itlwm.kext"]));
-            }
-            (PciClass::Wireless, 0x14E4, _) => {
-                sources.push(github(
-                    "acidanthera/AirportBrcmFixup",
-                    "AirportBrcmFixup-",
-                    "release",
-                    &["AirportBrcmFixup.kext"],
-                ));
-            }
-            _ => {}
+    for row in &report.rows {
+        for id in &row.kexts {
+            wanted.push((*id, format!("{}: {}", row.category, row.name)));
         }
     }
-    sources
+    CATALOG
+        .iter()
+        .filter(|d| macos >= d.min && macos <= d.max)
+        .map(|def| match wanted.iter().find(|(id, _)| *id == def.id) {
+            Some((_, why)) => Choice { def, enabled: true, reason: why.clone() },
+            None => Choice { def, enabled: false, reason: String::new() },
+        })
+        .collect()
 }
 
 pub fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
@@ -189,52 +185,64 @@ fn push_bundle(relative: String, absolute: &Path, entries: &mut Vec<KextEntry>) 
     Ok(())
 }
 
-pub fn fetch(hw: &Hardware, xe: bool, work: &Path, destination: &Path) -> Result<Vec<KextEntry>> {
+pub fn fetch(choices: &[Choice], work: &Path, destination: &Path) -> Result<Vec<KextEntry>> {
     std::fs::create_dir_all(destination)?;
+    // each release zip is downloaded once even when several kexts come from it
+    let mut extracted: HashMap<String, Option<PathBuf>> = HashMap::new();
     let mut names: Vec<String> = Vec::new();
-    let mut seen = HashSet::new();
+    let mut skipped = 0;
 
-    for (index, source) in plan(hw, xe).into_iter().enumerate() {
-        let key = match &source.origin {
-            Origin::Github(repo, _, _) => repo.to_string(),
-            Origin::Direct(url) => url.to_string(),
+    for choice in choices.iter().filter(|c| c.enabled) {
+        let def = choice.def;
+        let key = if def.direct.is_empty() {
+            format!("{}|{}|{}", def.repo, def.asset, def.contains)
+        } else {
+            def.direct.to_string()
         };
-        if !seen.insert(key.clone()) {
-            continue;
+        if !extracted.contains_key(&key) {
+            println!("Downloading {} ...", def.id);
+            let dir = work.join(format!("kext-{}", extracted.len()));
+            let result = (|| -> Result<()> {
+                let url = if def.direct.is_empty() {
+                    download::release_asset(def.repo, def.asset, def.contains)?
+                } else {
+                    def.direct.to_string()
+                };
+                download::extract_zip(&url, &dir)
+            })();
+            match result {
+                Ok(()) => {
+                    extracted.insert(key.clone(), Some(dir));
+                }
+                Err(error) => {
+                    eprintln!("skipped {}: {error}", def.id);
+                    extracted.insert(key.clone(), None);
+                }
+            }
         }
-
-        let extract = work.join(format!("kext-{index}"));
-        let result = (|| -> Result<()> {
-            let url = match &source.origin {
-                Origin::Github(repo, prefix, contains) => download::release_asset(repo, prefix, contains)?,
-                Origin::Direct(url) => url.to_string(),
-            };
-            download::extract_zip(&url, &extract)
-        })();
-        if let Err(error) = result {
-            eprintln!("skipped {key}: {error}");
+        let Some(Some(dir)) = extracted.get(&key) else {
+            skipped += 1;
             continue;
-        }
+        };
 
         let mut found = Vec::new();
-        if extract.is_dir() {
-            top_level_kexts(&extract, &mut found)?;
+        if dir.is_dir() {
+            top_level_kexts(dir, &mut found)?;
         }
         found.sort_by_key(|p| {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
-            source.wanted.iter().position(|w| *w == name).unwrap_or(usize::MAX)
+            def.bundles.iter().position(|w| *w == name).unwrap_or(usize::MAX)
         });
-
         for path in found {
-            let relative = path.strip_prefix(&extract).unwrap_or(&path);
-            if relative.components().any(|c| {
-                let part = c.as_os_str().to_string_lossy().to_lowercase();
-                part == "debug"
-            }) {
+            let relative = path.strip_prefix(dir).unwrap_or(&path);
+            if relative
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().to_lowercase() == "debug")
+            {
                 continue;
             }
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if !source.wanted.is_empty() && !source.wanted.iter().any(|w| *w == name) {
+            if !def.bundles.is_empty() && !def.bundles.iter().any(|w| *w == name) {
                 continue;
             }
             if names.contains(&name) {
@@ -249,5 +257,6 @@ pub fn fetch(hw: &Hardware, xe: bool, work: &Path, destination: &Path) -> Result
     for name in &names {
         push_bundle(name.clone(), &destination.join(name), &mut entries)?;
     }
+    println!("{} kext bundles installed, {} skipped", entries.len(), skipped);
     Ok(entries)
 }

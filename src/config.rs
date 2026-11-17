@@ -1,3 +1,4 @@
+// conf
 use crate::compat::MacOs;
 use crate::hardware::{Hardware, PciClass};
 use crate::kexts::KextEntry;
@@ -8,16 +9,19 @@ use std::path::Path;
 
 const NVRAM_GUID: &str = "7C436110-AB2A-4BBB-A880-FE41995C9F82";
 const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
-const MODELS: [(&str, &str); 4] = [
-    ("iMac17,1", "MacBookPro13,1"),
-    ("iMac18,3", "MacBookPro14,1"),
-    ("iMac19,1", "MacBookPro15,2"),
-    ("iMac20,1", "MacBookPro16,1"),
+/// (model, newest macOS major it officially supports)
+const LAPTOPS: [(&str, u32); 4] = [
+    ("MacBookPro13,1", 13),
+    ("MacBookPro14,1", 13),
+    ("MacBookPro15,2", 15),
+    ("MacBookPro16,1", 26),
 ];
+const DESKTOPS: [(&str, u32); 4] = [("iMac17,1", 12), ("iMac18,3", 13), ("iMac19,1", 15), ("iMac20,1", 26)];
 
 pub struct Options {
     pub xe: bool,
     pub dvmt_60: bool,
+    pub smbios: String,
 }
 
 fn text(value: &str) -> Value {
@@ -80,7 +84,11 @@ fn uuid() -> String {
     )
 }
 
-fn product(hw: &Hardware, macos: &MacOs) -> &'static str {
+pub fn models(hw: &Hardware) -> Vec<(&'static str, u32)> {
+    if hw.is_laptop { LAPTOPS.to_vec() } else { DESKTOPS.to_vec() }
+}
+
+pub fn default_model(hw: &Hardware, macos: &MacOs) -> &'static str {
     let by_generation: usize = match hw.generation {
         6 => 0,
         7 => 1,
@@ -96,12 +104,7 @@ fn product(hw: &Hardware, macos: &MacOs) -> &'static str {
     } else {
         0
     };
-    let model = MODELS[by_generation.max(by_os)];
-    if hw.is_laptop {
-        model.1
-    } else {
-        model.0
-    }
+    models(hw)[by_generation.max(by_os)].0
 }
 
 fn platform_id(hw: &Hardware) -> Option<[u8; 4]> {
@@ -121,7 +124,6 @@ fn platform_id(hw: &Hardware) -> Option<[u8; 4]> {
 pub fn build(
     sample: &Path,
     hw: &Hardware,
-    macos: &MacOs,
     options: &Options,
     kexts: &[KextEntry],
     acpi: &[String],
@@ -262,7 +264,7 @@ pub fn build(
             ("MLB", text(&random_string(17))),
             ("ROM", data(&rom)),
             ("SpoofVendor", flag(true)),
-            ("SystemProductName", text(product(hw, macos))),
+            ("SystemProductName", text(&options.smbios)),
             ("SystemSerialNumber", text(&random_string(12))),
             ("SystemUUID", text(&uuid())),
         ],

@@ -2,7 +2,7 @@
 Type=Application
 Name=OpCore Simplify
 Comment=Generate an OpenCore EFI for this hardware
-Exec=opcore-simplify
-Icon=opcore-simplify
+Exec=opcore-builder
+Icon=opcore-builder
 Terminal=true
 Categories=Utility;

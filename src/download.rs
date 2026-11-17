@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
-        .user_agent("opcore-simplify")
+        .user_agent("opcore-builder")
         .build()?)
 }
 

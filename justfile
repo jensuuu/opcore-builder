@@ -17,7 +17,7 @@ win:
     mkdir -p dist
     rustup target add x86_64-pc-windows-gnu
     cargo build --release --target x86_64-pc-windows-gnu
-    cp target/x86_64-pc-windows-gnu/release/opcore-simplify.exe dist/opcore-simplify-windows-x86_64.exe
+    cp target/x86_64-pc-windows-gnu/release/opcore-builder.exe dist/opcore-builder-windows-x86_64.exe
 
 # Native build when running on Windows
 [windows]

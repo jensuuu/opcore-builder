@@ -1,12 +1,26 @@
 mod acpi;
+mod builder;
 mod compat;
 mod config;
 mod download;
 mod hardware;
 mod kexts;
+mod ui;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{bail, Result};
 use std::path::PathBuf;
+
+const USAGE: &str = "opcore-builder - generate an OpenCore EFI for this machine
+
+usage: opcore-builder [options]
+  (no options)       interactive menu
+  --yes              skip the menu and build with the recommended settings
+  --macos <version>  macOS version, e.g. Sonoma or 14
+  --out <folder>     output folder (default: EFI-Output)
+  --dvmt-60          Tiger Lake Xe: patch DVMT pre-alloc to 60MB
+  --help             show this text
+
+Set GITHUB_TOKEN to use the GitHub API with a higher rate limit.";
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -14,80 +28,30 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return Ok(());
+    }
     let out = PathBuf::from(arg_value(&args, "--out").unwrap_or_else(|| "EFI-Output".to_string()));
     let dvmt_60 = args.iter().any(|a| a == "--dvmt-60");
+    let non_interactive = args.iter().any(|a| a == "--yes");
 
     let hw = hardware::detect()?;
-    compat::check(&hw)?;
-    println!("CPU: {} (generation {})", hw.cpu_name, hw.generation);
-    println!("Form factor: {}", if hw.is_laptop { "laptop" } else { "desktop" });
-    for device in hw.devices.iter().filter(|d| d.class == hardware::PciClass::Display) {
-        println!("GPU: {:04x}:{:04x}", device.vendor, device.device);
-    }
+    let report = compat::analyze(&hw);
+    let macos = match arg_value(&args, "--macos") {
+        Some(value) => compat::parse_version(&report, &value)?,
+        None => compat::default_version(&report),
+    };
+    let mut state = builder::State::new(hw, report, macos, out, dvmt_60);
 
-    let macos = compat::choose(&hw, arg_value(&args, "--macos"))?;
-    let xe = hw.xe_igpu().is_some();
-
-    let work = std::env::temp_dir().join("opcore-simplify");
-    if work.exists() {
-        std::fs::remove_dir_all(&work)?;
-    }
-    std::fs::create_dir_all(&work)?;
-
-    let efi = out.join("EFI");
-    if efi.exists() {
-        std::fs::remove_dir_all(&efi)?;
-    }
-    std::fs::create_dir_all(&out)?;
-
-    let opencore_url = download::release_asset("acidanthera/OpenCorePkg", "OpenCore-", "release")?;
-    download::extract_zip(&opencore_url, &work.join("oc"))?;
-    let oc_root = work.join("oc");
-    let base_efi = download::find(&oc_root.join("X64"), "EFI")
-        .or_else(|| download::find(&oc_root, "EFI"))
-        .ok_or_else(|| anyhow!("EFI folder not found in OpenCore package"))?;
-    let sample_plist = download::find(&oc_root, "Sample.plist")
-        .ok_or_else(|| anyhow!("Sample.plist not found in OpenCore package"))?;
-    let acpi_samples = download::find(&oc_root, "Binaries")
-        .ok_or_else(|| anyhow!("ACPI sample binaries not found in OpenCore package"))?;
-    kexts::copy_dir(&base_efi, &efi)?;
-
-    let oc = efi.join("OC");
-    for folder in ["Drivers", "Tools", "ACPI", "Kexts"] {
-        let path = oc.join(folder);
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
+    if non_interactive {
+        ui::print_report(&state);
+        ui::print_compat(&state);
+        if let Some(reason) = &state.report.blocked {
+            bail!("this hardware cannot be built: {reason}");
         }
-        std::fs::create_dir_all(&path)?;
+        println!("\nTarget: macOS {} ({}), SMBIOS {}\n", state.macos.name, state.macos.major, state.smbios);
+        return builder::run_build(&state);
     }
-
-    let runtime = download::find(&base_efi.join("OC/Drivers"), "OpenRuntime.efi")
-        .ok_or_else(|| anyhow!("OpenRuntime.efi not found in OpenCore package"))?;
-    std::fs::copy(&runtime, oc.join("Drivers/OpenRuntime.efi")).context("copying OpenRuntime.efi")?;
-    std::fs::write(
-        oc.join("Drivers/HfsPlus.efi"),
-        download::fetch("https://github.com/acidanthera/OcBinaryData/raw/master/Drivers/HfsPlus.efi")?,
-    )?;
-    let drivers = vec!["HfsPlus.efi".to_string(), "OpenRuntime.efi".to_string()];
-
-    let acpi_files = acpi::install(&acpi_samples, &oc.join("ACPI"), &hw)?;
-    let kext_entries = kexts::fetch(&hw, xe, &work, &oc.join("Kexts"))?;
-
-    let options = config::Options { xe, dvmt_60 };
-    let plist = config::build(
-        &sample_plist,
-        &hw,
-        macos,
-        &options,
-        &kext_entries,
-        &acpi_files,
-        &drivers,
-    )?;
-    plist::to_file_xml(oc.join("config.plist"), &plist).context("writing config.plist")?;
-
-    println!("EFI written to {}", efi.display());
-    if xe {
-        println!("After first boot install the latest package from https://github.com/b00t0x/WhateverXe-Graphics/releases and restart");
-    }
-    Ok(())
+    ui::run(&mut state)
 }
